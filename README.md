@@ -31,3 +31,5 @@ Options for simulation:
 `cohort_member` stands for any other node in the network
 
 `q`, `w` and `p` stands for algorithm states in which transaction abort, timeout or fail 
+
+According to states described [here](http://courses.cs.vt.edu/~cs5204/fall00/distributedDBMS/sreenu/3pc.html).
