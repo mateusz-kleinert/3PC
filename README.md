@@ -12,6 +12,7 @@ mpirun -n [proc_num] ./a.out [options]
 ```
 
 Options for simulation:
+ - --t_intersection
  - --coord_timeout_q
  - --coord_timeout_w
  - --coord_timeout_p
@@ -26,9 +27,13 @@ Options for simulation:
  - --cohort_member_failure_p
  - --cohort_member_abort_q
 
-`coord` stands for coordinator node - node with id 0
+This code simulates commit of two simultaneous transactions. The cohort sets are separate. To change this setting use
+`t_intersection` switch, then one node of the network will be shared.  
 
-`cohort_member` stands for any other node in the network
+`coord` stands for coordinator node - as coordinator there are only two nodes: 0 and 1. However, timeout and failure can
+be simulated only on the first coordinator.
+
+`cohort_member` stands for any other node in the network. Simulation of timeout and failure of cohort member affects random nodes. 
 
 `q`, `w` and `p` stands for algorithm states in which transaction abort, timeout or fail 
 

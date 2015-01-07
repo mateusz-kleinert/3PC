@@ -5,6 +5,7 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <cstdlib>
+#include <vector>
 
 #define DEBUG 							true
 #define MSG_COMMIT_REQUEST				100
@@ -14,8 +15,10 @@
 #define MSG_COMMIT 						104
 #define MSG_PREPARE						105
 #define MSG_SIZE 						1
-#define COOR_NODE						0
+#define COOR_NODE_1						0
+#define COOR_NODE_2						1
 #define TIMEOUT							10.0
+#define WAIT							2
 
 using namespace std;
 
@@ -37,10 +40,13 @@ static int cohort_member_failure_q = 0;
 static int cohort_member_failure_w = 0;
 static int cohort_member_failure_p = 0;
 
+static int t_intersection = 0;
+
 static int cohort_member_abort_q = 0;
 
 static struct option long_options[] =
 {
+	{"t_intersection", no_argument, &t_intersection, 1},
     {"coord_timeout_q", no_argument, &coord_timeout_q, 1},
     {"coord_timeout_w", no_argument, &coord_timeout_w, 1},
     {"coord_timeout_p", no_argument, &coord_timeout_p, 1},
@@ -59,8 +65,14 @@ static struct option long_options[] =
 
 int node_id, size, tag;
 States node_state = States::query;
-auto transaction_start_time = chrono::steady_clock::now();
+chrono::steady_clock::time_point transaction_start_time = chrono::steady_clock::now();
 double current_time;
+vector<int> cohort_1;
+vector<int> cohort_2;
+int COOR_NODE = -1;
+int TRANSACTION_NUM = -1;
+int *num_transactions_involved;
+int w_size;
 
 void print_debug_message (const char* message);
 void check_opt (int argc, char **argv);
@@ -93,13 +105,78 @@ int main(int argc, char **argv) {
 	MPI_Comm_rank(MPI_COMM_WORLD, &node_id);
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+	if (size < 4) {
+		cout << "At least 4 nodes needed" << endl;
+		MPI_Finalize();
+	}
+
   	MPI_Barrier(MPI_COMM_WORLD);
 
-  	if (node_id == COOR_NODE) {
-  		coordinator ();
-  	} else {
-  		cohort_member ();
+  	num_transactions_involved = new int[size];
+
+  	for (int i = 0; i < size; i++)
+  		num_transactions_involved[i] = 1;
+
+  	for (int i = 0; i < size; i++)
+  			if (i % 2 == 0) 
+  				cohort_1.push_back(i);
+  			else 
+  				cohort_2.push_back(i);
+
+  	if (t_intersection) {
+  		cohort_1.push_back(cohort_2[cohort_2.size() - 1]);
+  		num_transactions_involved[cohort_2[cohort_2.size() - 1]]++;
   	}
+
+  	if (node_id == COOR_NODE_1) {
+  		w_size = cohort_1.size();
+
+  		cout << "Transaction 1 members: ";
+  		for (int i = 0; i < cohort_1.size(); i++)
+  			cout << cohort_1[i] << ' ';
+  		cout << endl;
+
+  		cout << "Transaction 2 members: ";
+  		for (int i = 0; i < cohort_2.size(); i++)
+  			cout << cohort_2[i] << ' ';
+  		cout << endl;
+  	} else if (node_id == COOR_NODE_2) {
+  		w_size = cohort_2.size();
+  	}
+
+  	MPI_Barrier(MPI_COMM_WORLD);
+
+  	if (node_id == COOR_NODE_1 || node_id == COOR_NODE_2) {
+  		TRANSACTION_NUM = node_id;
+
+  		while (node_state != States::commit) {
+  			print_debug_message("Trying to commit transaction");
+  			transaction_start_time = chrono::steady_clock::now();
+  			node_state = States::query;
+  			coordinator ();
+  			sleep(WAIT);
+  		}
+  	} else {
+  		for (int i = 0; i < cohort_1.size(); i++)
+  			if (cohort_1[i] == node_id) {
+  				TRANSACTION_NUM = COOR_NODE_1;
+  				COOR_NODE = COOR_NODE_1;
+  			}
+
+  		if (COOR_NODE == -1) {
+  			TRANSACTION_NUM = COOR_NODE_2;
+  			COOR_NODE = COOR_NODE_2;
+  		}
+
+  		while (node_state != States::commit || num_transactions_involved[node_id] > 0) {
+  			transaction_start_time = chrono::steady_clock::now();
+  			node_state = States::query;
+  			cohort_member ();
+  			sleep(WAIT);
+  		}
+  	}
+
+  	delete[] num_transactions_involved;
 
   	MPI_Barrier(MPI_COMM_WORLD);
 
@@ -107,13 +184,19 @@ int main(int argc, char **argv) {
 }
 
 void bcast(void* data, int count, MPI_Datatype datatype, int root, MPI_Comm communicator, MPI_Request *request, int tag) {
-	for (int i = 1; i < size; i++) {
-	    MPI_Isend(data, count, datatype, i, tag, communicator, request);
+	if (node_id == COOR_NODE_1) {
+		for (int i = 1; i < cohort_1.size(); i++) {
+		    MPI_Isend(data, count, datatype, cohort_1[i], tag, communicator, request);
+		}
+	} else {
+		for (int i = 1; i < cohort_2.size(); i++) {
+		    MPI_Isend(data, count, datatype, cohort_2[i], tag, communicator, request);
+		}
 	}
 }
 
 void cohort_member () {
-	int r = (rand() % size) + 1;
+	int r = (rand() % size) + 2;
 
 	if (node_state != States::abort)
 		wait_for_commit_request_msg ();
@@ -150,6 +233,9 @@ void cohort_member () {
 
 	if (node_state != States::abort && node_state != States::commit)
 		wait_for_commit_msg ();
+
+	if (node_state == States::commit)
+		num_transactions_involved[node_id]--;
 }
 
 void wait_for_prepare_msg () {
@@ -289,6 +375,9 @@ void wait_for_commit_request_msg () {
 			if (flag) {
 				MPI_Recv(&data, MSG_SIZE, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
+				COOR_NODE = status.MPI_SOURCE;
+				TRANSACTION_NUM = status.MPI_SOURCE;
+
 				if (status.MPI_TAG == MSG_ABORT) {
 					print_debug_message("Abort msg received");
 					node_state = States::abort;
@@ -310,7 +399,7 @@ void coordinator () {
 	if (coord_timeout_q && node_state != States::abort)
 		simulate_coordinator_timeout ();
 
-	if (coord_failure_q && node_state != States::abort)
+	if (coord_failure_q && COOR_NODE_1 == node_id && node_state != States::abort)
 		simulate_coordinator_failure ();
 
 	if (node_state != States::abort)
@@ -319,10 +408,10 @@ void coordinator () {
 	if (node_state != States::abort)
 		wait_for_agreed_msg ();
 
-	if (coord_timeout_w && node_state != States::abort)
+	if (coord_timeout_w && COOR_NODE_1 == node_id && node_state != States::abort)
 		simulate_coordinator_timeout ();
 
-	if (coord_failure_w && node_state != States::abort)
+	if (coord_failure_w && COOR_NODE_1 == node_id && node_state != States::abort)
 		simulate_coordinator_failure ();
 
 	if (node_state != States::abort)
@@ -331,10 +420,10 @@ void coordinator () {
 	if (node_state != States::abort)
 		wait_for_ack_msg ();
 
-	if (coord_timeout_p && node_state != States::abort)
+	if (coord_timeout_p && COOR_NODE_1 == node_id && node_state != States::abort)
 		simulate_coordinator_timeout ();
 
-	if (coord_failure_p && node_state != States::abort)
+	if (coord_failure_p && COOR_NODE_1 == node_id && node_state != States::abort)
 		simulate_coordinator_failure ();
 
 	if (node_state != States::abort && node_state != States::commit)
@@ -365,7 +454,7 @@ void simulate_coordinator_timeout () {
 
 void print_debug_message (const char* message) {
 	if (DEBUG)
-		cout << "Node [" << node_id << "]: " << message << endl;
+		cout << "Node [" << node_id << "] (T " << TRANSACTION_NUM << "): " << message << endl;
 }
 
 void check_opt (int argc, char **argv) {
@@ -385,7 +474,7 @@ void check_opt (int argc, char **argv) {
 void wait_for_ack_msg () {
 	int recv_count = 1;
 
-	while (recv_count < size) {
+	while (recv_count < w_size) {
 		int data, flag;
 		MPI_Status status;
 
@@ -424,8 +513,8 @@ void broadcast_commit_msg () {
 	print_debug_message("Commit msg sent to all cohorts");
 
 	node_state = States::commit;
-
 }
+
 void broadcast_prepare_msg () {
 	print_debug_message("All cohorts agreed");
 
@@ -461,7 +550,7 @@ void broadcast_commit_request () {
 void wait_for_agreed_msg () {
 	int recv_count = 1;
 
-	while (recv_count < size) {
+	while (recv_count < w_size) {
 		int data, flag;
 		MPI_Status status;
 
