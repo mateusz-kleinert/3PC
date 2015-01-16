@@ -95,6 +95,8 @@ void send_ack_reply ();
 void wait_for_prepare_msg ();
 void wait_for_commit_msg ();
 void bcast (void* data, int count, MPI_Datatype datatype, int root, MPI_Comm communicator, MPI_Request *request);
+void select_coordinator ();
+void setup ();
 
 int main(int argc, char **argv) {
 	check_opt(argc, argv);
@@ -112,7 +114,40 @@ int main(int argc, char **argv) {
 
   	MPI_Barrier(MPI_COMM_WORLD);
 
-  	num_transactions_involved = new int[size];
+  	setup ();
+
+  	MPI_Barrier(MPI_COMM_WORLD);
+
+  	if (node_id == COOR_NODE_1 || node_id == COOR_NODE_2) {
+  		TRANSACTION_NUM = node_id;
+
+  		while (node_state != States::commit) {
+  			print_debug_message("Trying to commit transaction");
+  			transaction_start_time = chrono::steady_clock::now();
+  			node_state = States::query;
+  			coordinator ();
+  			sleep(WAIT);
+  		}
+  	} else {
+  		select_coordinator ();
+
+  		while (node_state != States::commit || num_transactions_involved[node_id] > 0) {
+  			transaction_start_time = chrono::steady_clock::now();
+  			node_state = States::query;
+  			cohort_member ();
+  			sleep(WAIT);
+  		}
+  	}
+
+  	delete[] num_transactions_involved;
+
+  	MPI_Barrier(MPI_COMM_WORLD);
+
+  	MPI_Finalize();
+}
+
+void setup () {
+	num_transactions_involved = new int[size];
 
   	for (int i = 0; i < size; i++)
   		num_transactions_involved[i] = 1;
@@ -143,44 +178,19 @@ int main(int argc, char **argv) {
   	} else if (node_id == COOR_NODE_2) {
   		w_size = cohort_2.size();
   	}
+}
 
-  	MPI_Barrier(MPI_COMM_WORLD);
+void select_coordinator () {
+	for (int i = 0; i < cohort_1.size(); i++)
+		if (cohort_1[i] == node_id) {
+			TRANSACTION_NUM = COOR_NODE_1;
+			COOR_NODE = COOR_NODE_1;
+		}
 
-  	if (node_id == COOR_NODE_1 || node_id == COOR_NODE_2) {
-  		TRANSACTION_NUM = node_id;
-
-  		while (node_state != States::commit) {
-  			print_debug_message("Trying to commit transaction");
-  			transaction_start_time = chrono::steady_clock::now();
-  			node_state = States::query;
-  			coordinator ();
-  			sleep(WAIT);
-  		}
-  	} else {
-  		for (int i = 0; i < cohort_1.size(); i++)
-  			if (cohort_1[i] == node_id) {
-  				TRANSACTION_NUM = COOR_NODE_1;
-  				COOR_NODE = COOR_NODE_1;
-  			}
-
-  		if (COOR_NODE == -1) {
-  			TRANSACTION_NUM = COOR_NODE_2;
-  			COOR_NODE = COOR_NODE_2;
-  		}
-
-  		while (node_state != States::commit || num_transactions_involved[node_id] > 0) {
-  			transaction_start_time = chrono::steady_clock::now();
-  			node_state = States::query;
-  			cohort_member ();
-  			sleep(WAIT);
-  		}
-  	}
-
-  	delete[] num_transactions_involved;
-
-  	MPI_Barrier(MPI_COMM_WORLD);
-
-  	MPI_Finalize();
+	if (COOR_NODE == -1) {
+		TRANSACTION_NUM = COOR_NODE_2;
+		COOR_NODE = COOR_NODE_2;
+	}
 }
 
 void bcast(void* data, int count, MPI_Datatype datatype, int root, MPI_Comm communicator, MPI_Request *request, int tag) {
@@ -201,23 +211,33 @@ void cohort_member () {
 	if (node_state != States::abort)
 		wait_for_commit_request_msg ();
 
-	if (cohort_member_timeout_q && node_state != States::abort && node_id == r)
+	if (cohort_member_timeout_q && node_state != States::abort && node_id == r) {
 		simulate_cohort_member_timeout ();
+		cohort_member_timeout_q = false;
+	}
 
-	if (cohort_member_failure_q && node_state != States::abort && node_id == r)
+	if (cohort_member_failure_q && node_state != States::abort && node_id == r) {
 		simulate_cohort_member_failure ();
+		cohort_member_failure_q = false;
+	}
 
-	if (cohort_member_abort_q && node_state != States::abort && node_id == r)
+	if (cohort_member_abort_q && node_state != States::abort && node_id == r) {
 		send_abort_reply ();
+		cohort_member_abort_q = false;
+	}
 	
 	if (node_state != States::abort)
 		send_agreed_reply ();
 
-	if (cohort_member_timeout_w && node_state != States::abort && node_id == r)
+	if (cohort_member_timeout_w && node_state != States::abort && node_id == r) {
 		simulate_cohort_member_timeout ();
+		cohort_member_timeout_w = false;
+	}
 
-	if (cohort_member_failure_w && node_state != States::abort && node_id == r)
+	if (cohort_member_failure_w && node_state != States::abort && node_id == r) {
 		simulate_cohort_member_failure ();
+		cohort_member_failure_w = false;
+	}
 
 	if (node_state != States::abort)
 		wait_for_prepare_msg ();
@@ -225,11 +245,15 @@ void cohort_member () {
 	if (node_state != States::abort)
 		send_ack_reply ();
 
-	if (cohort_member_timeout_p && node_state != States::abort && node_id == r)
+	if (cohort_member_timeout_p && node_state != States::abort && node_id == r) {
 		simulate_cohort_member_timeout ();
+		cohort_member_timeout_p = false;
+	}
 
-	if (cohort_member_failure_p && node_state != States::abort && node_id == r)
+	if (cohort_member_failure_p && node_state != States::abort && node_id == r) {
 		simulate_cohort_member_failure ();
+		cohort_member_failure_p = false;
+	}
 
 	if (node_state != States::abort && node_state != States::commit)
 		wait_for_commit_msg ();
@@ -396,11 +420,15 @@ void wait_for_commit_request_msg () {
 }
 
 void coordinator () {
-	if (coord_timeout_q && node_state != States::abort)
+	if (coord_timeout_q && node_state != States::abort) {
 		simulate_coordinator_timeout ();
+		coord_timeout_q = false;
+	}
 
-	if (coord_failure_q && COOR_NODE_1 == node_id && node_state != States::abort)
+	if (coord_failure_q && COOR_NODE_1 == node_id && node_state != States::abort) {
 		simulate_coordinator_failure ();
+		coord_failure_q = false;
+	}
 
 	if (node_state != States::abort)
 		broadcast_commit_request ();
@@ -408,11 +436,15 @@ void coordinator () {
 	if (node_state != States::abort)
 		wait_for_agreed_msg ();
 
-	if (coord_timeout_w && COOR_NODE_1 == node_id && node_state != States::abort)
+	if (coord_timeout_w && COOR_NODE_1 == node_id && node_state != States::abort) {
 		simulate_coordinator_timeout ();
+		coord_timeout_w = false;
+	}
 
-	if (coord_failure_w && COOR_NODE_1 == node_id && node_state != States::abort)
+	if (coord_failure_w && COOR_NODE_1 == node_id && node_state != States::abort) {
 		simulate_coordinator_failure ();
+		coord_failure_w = false;
+	}
 
 	if (node_state != States::abort)
 		broadcast_prepare_msg ();
@@ -420,11 +452,15 @@ void coordinator () {
 	if (node_state != States::abort)
 		wait_for_ack_msg ();
 
-	if (coord_timeout_p && COOR_NODE_1 == node_id && node_state != States::abort)
+	if (coord_timeout_p && COOR_NODE_1 == node_id && node_state != States::abort) {
 		simulate_coordinator_timeout ();
+		coord_timeout_p = false;
+	}
 
-	if (coord_failure_p && COOR_NODE_1 == node_id && node_state != States::abort)
+	if (coord_failure_p && COOR_NODE_1 == node_id && node_state != States::abort) {
 		simulate_coordinator_failure ();
+		coord_failure_p = false;
+	}
 
 	if (node_state != States::abort && node_state != States::commit)
 		broadcast_commit_msg ();
